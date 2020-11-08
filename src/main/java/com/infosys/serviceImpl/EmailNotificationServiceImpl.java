@@ -22,18 +22,14 @@ import java.util.UUID;
 import javax.activation.DataHandler;
 import javax.activation.DataSource;
 import javax.activation.FileDataSource;
-import javax.mail.BodyPart;
-import javax.mail.Message;
-import javax.mail.MessagingException;
-import javax.mail.Multipart;
-import javax.mail.Session;
-import javax.mail.Transport;
+import javax.mail.*;
 import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeBodyPart;
 import javax.mail.internet.MimeMessage;
 import javax.mail.internet.MimeMultipart;
 import javax.mail.util.ByteArrayDataSource;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.IOUtils;
 import org.apache.http.HttpResponse;
 import org.apache.pdfbox.multipdf.Overlay;
@@ -52,6 +48,7 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -60,6 +57,7 @@ import org.sunbird.common.models.response.Response;
 import org.sunbird.common.models.util.ProjectLogger;
 import org.sunbird.common.models.util.ProjectUtil;
 import org.sunbird.common.models.util.PropertiesCache;
+import org.sunbird.common.models.util.mail.GMailAuthenticator;
 import org.sunbird.helper.ServiceFactory;
 
 import com.infosys.elastic.helper.ConnectionManager;
@@ -71,6 +69,9 @@ import com.infosys.util.Templates;
 @Service
 public class EmailNotificationServiceImpl implements EmailNotificationService {
 
+	@Value("${enable.domain.validation}")
+	boolean enableDomainValidation;
+
 	@Autowired
 	UserUtilityService userUtilService;
 
@@ -79,6 +80,8 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 	private PropertiesCache properties = PropertiesCache.getInstance();
 	private String SMTPHOST;
 	private String SMTPPORT;
+	private String SMTPUSERNAME;
+	private String SMTPPASSWORD;
 	private String bodhiKeyspace = LexJsonKey.BODHI_DB_KEYSPACE;
 	private String shareTable = properties.getProperty(LexJsonKey.SHARED_GOALS_TRACKER);
 	private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
@@ -91,11 +94,15 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 	public Map<String, Object> Notify(Map<String, Object> data) {
 		SMTPHOST = System.getenv(LexJsonKey.SMTP_HOST);
 		SMTPPORT = System.getenv(LexJsonKey.SMTP_PORT);
+		SMTPUSERNAME = System.getenv(LexJsonKey.SMTP_USERNAME);
+		SMTPPASSWORD = System.getenv(LexJsonKey.SMTP_PASSWORD);
 
 		if (ProjectUtil.isStringNullOREmpty(SMTPHOST) || ProjectUtil.isStringNullOREmpty(SMTPPORT)) {
 			ProjectLogger.log("SMTP config is not coming form System variable.");
 			SMTPHOST = properties.getProperty(LexJsonKey.SMTP_HOST);
 			SMTPPORT = properties.getProperty(LexJsonKey.SMTP_PORT);
+			SMTPUSERNAME = properties.getProperty(LexJsonKey.SMTP_USERNAME);
+			SMTPPASSWORD = properties.getProperty(LexJsonKey.SMTP_PASSWORD);
 		}
 		Map<String, Object> ret = new HashMap<String, Object>();
 		String msg = "Success";
@@ -129,7 +136,19 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 		props.put("mail.smtp.host", SMTPHOST);
 		props.put("mail.smtp.port", SMTPPORT);
 
-		Session session = Session.getDefaultInstance(props, null);
+		props.put("mail.smtp.socketFactory.port", SMTPPORT);
+		props.put("mail.smtp.auth", "true");
+		props.put("mail.smtp.starttls.enable", "true");
+
+		Session session = Session.getDefaultInstance(props,
+				new Authenticator() {
+					protected PasswordAuthentication  getPasswordAuthentication() {
+						return new PasswordAuthentication(
+								SMTPUSERNAME, SMTPPASSWORD);
+					}
+				});
+
+		//Session session = Session.getInstance(props, new GMailAuthenticator(SMTPUSERNAME, SMTPPASSWORD));
 
 		try {
 			Multipart multipart = new MimeMultipart();
@@ -394,6 +413,7 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 			Transport.send(message);
 
 		} catch (Exception e) {
+			e.printStackTrace();
 			msg = e.getMessage();
 			ProjectLogger.log("EmailError : " + e.getMessage(), e);
 		}
@@ -999,16 +1019,26 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 		String bccList = "";
 		Set<String> invalidIds = new HashSet<String>();
 		Map<String, Object> mailData = userUtilService.getMailData();
+		System.out.println("mailData : "+mailData);
 		List<String> domains = new ArrayList<>(Arrays.asList(mailData.get("domains").toString().split(",")));
 		for (Map<String, Object> tempTo : (List<Map<String, Object>>) data.get("emailTo")) {
+			System.out.println("tempTo : "+tempTo);
+
 			String toEmailId = tempTo.get("email").toString().contains("@") ? tempTo.get("email").toString()
 					: tempTo.get("email").toString() + "";
-			if (!domains.contains("@" + toEmailId.split("@")[1])) {
+			System.out.println("toEmailId : "+toEmailId);
+				System.out.println("domains : "+domains);
+
+			if (enableDomainValidation && !domains.contains("@" + toEmailId.split("@")[1])) {
 				invalidIds.add(toEmailId);
 				continue;
 			}
+			System.out.println("invalidIds : "+invalidIds);
+
 			toList += toEmailId;
 			toList += ",";
+			System.out.println("toList : "+toList);
+
 		}
 		if (!toList.isEmpty()) {
 			toList = toList.substring(0, toList.length() - 1);
@@ -1023,6 +1053,8 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 		if (!ccList.isEmpty()) {
 			ccList = ccList.substring(0, ccList.length() - 1);
 		}
+		System.out.println("ccList : "+ccList);
+
 
 		if (data.containsKey("bccTo"))
 			for (Map<String, Object> bccTo : (List<Map<String, Object>>) data.get("bccTo")) {
@@ -1033,6 +1065,7 @@ public class EmailNotificationServiceImpl implements EmailNotificationService {
 		if (!bccList.isEmpty()) {
 			bccList = bccList.substring(0, bccList.length() - 1);
 		}
+		System.out.println("bccList : "+bccList);
 
 		String verifyIds = (toList.equals("") ? "" : toList.replaceAll("@infosys", "@ad.infosys"))
 				+ (ccList.equals("") ? ""
